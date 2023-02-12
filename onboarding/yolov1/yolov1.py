@@ -1,6 +1,7 @@
 """
 Implementation of YOLYv1 paper for the BDD100k dataset, mainly getting familiar with the workflow and
 trying to get familiar with what the previous semester's team did.
+Main model file
 """
 import torch
 import torch.nn as nn
@@ -10,7 +11,8 @@ from torchinfo import summary
 class CNNBlock(nn.Module):
     """
     Create a convolutional block which repeatedly appears in the architecture.
-    Takes an image of size (in_channels, )
+    Takes an image of size (batch, in_channels, x, y)
+    Outputs (batch, out_channels, x//stride, y//stride)
     """
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding) -> None:
         super().__init__()
@@ -48,6 +50,8 @@ class YOLOv1(nn.Module):
 
 
     def _conv_layers(self):
+        # nn.Sequential stacks blocks one after another.
+        # The output shape is mentioned after each block.
         return nn.Sequential(
             CNNBlock(
                 in_channels=3,
@@ -98,6 +102,10 @@ class YOLOv1(nn.Module):
 if __name__=="__main__":
     model = YOLOv1()
     summary(model, input_size=(16, 3, 448, 448))
+    # Verifying output dimensions
+    input = torch.rand(16, 3, 448, 448)
+    output = model(input)
+    print(output.size())
 
 # torchinfo output:
 """==========================================================================================
