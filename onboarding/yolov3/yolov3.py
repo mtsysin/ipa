@@ -92,16 +92,84 @@ class Darknet53(nn.Module):
         c5 = self.phase5(c4)
 
         return c1, c2, c3, c4, c5
+    
+
+    
+class FPN(nn.Module):
+    """
+    Implements FPN part of YOLOv3 arhitecture:
+    c5          -> conv 1x1 ->      p5 
+    ^                               V
+    CNNBlock                        UpSample
+    ^                               V
+    c4          -> conv 1x1 ->      p4
+    ^
+    CNNBlock                        UpSample
+    ^                               V
+    c3          -> conv 1x1 ->      p3
+    ^                              
+    CNNBlock
+    ^
+    c2
+    ^
+    CNNBlock
+    ^
+    c1
+    ^
+    CNNBlock
+    ^
+    in
+    """
+    def __init__(self) -> None:
+        super().__init__()
+
+        # Upsampler, nearest essentially creates 4 copies of a value in a 2x2 grid.
+        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
+
+        self.conv_c5_p5 = CNNBlock(1024, 256, 1, 1, 0)
+
+        self.conv_c4_p4 = CNNBlock(512, 256, 1, 1, 0)
+        self.conv_sum_p4 = CNNBlock(256, 256, 1, 1, 0)
+
+        self.conv_c3_p3 = CNNBlock(256, 256, 1, 1, 0)
+        self.conv_sum_p3 = CNNBlock(256, 256, 1, 1, 0)
+
+    def forward(self, c3, c4, c5):
+        p5 = self.conv_c5_p5(c5)
+        p4 = self.conv_sum_p4(self.upsample(p5) + self.conv_c4_p4(c4))
+        p3 = self.conv_sum_p3(self.upsample(p4) + self.conv_c3_p3(c3))
+
+        return p3, p4, p5
+    
+class YOLOv3(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self.darknet = Darknet53()
+        self.fpn = FPN()
+
+    def forward(self, x):
+        _, _, c3, c4, c5 = self.darknet(x)
+
+        p3, p4, p5 = self.fpn(c3, c4, c5)
+
+        return p3, p4, p5
+
+
 
 
 if __name__=="__main__":
     model = Darknet53()
     summary(model, input_size=(16, 3, 256, 256))
     # Verifying output dimensions
-    input = torch.rand(16, 3, 256, 256)
-    output = model(input)
-    for out in output:
-        print(out.size())
+    # input = torch.rand(16, 3, 256, 256)
+    # output = model(input)
+    # for out in output:
+    #     print(out.size())
+    model = YOLOv3()
+    summary(model, input_size=(16, 3, 256, 256))
+
+
 
 # torchinfo output for Darknet:
 """==========================================================================================
