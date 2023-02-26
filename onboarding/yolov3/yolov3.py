@@ -59,7 +59,10 @@ class CNNBlock(nn.Module):
     
 
 class Darknet53(nn.Module):
-    """Backbone architecture for YOLOv3"""
+    """
+    Backbone architecture for YOLOv3, the layer configuration is
+    taken from the YOLOv3 paper
+    """
     def __init__(self) -> None:
         super().__init__()
         self.phase1 = nn.Sequential(
@@ -92,12 +95,14 @@ class Darknet53(nn.Module):
         c5 = self.phase5(c4)
 
         return c1, c2, c3, c4, c5
-    
+
 
     
 class FPN(nn.Module):
     """
-    Implements FPN part of YOLOv3 arhitecture:
+    Implements FPN part of YOLOv3 architecture:
+    Takes outputs c3, c4, c5 from the backbone output and
+    returns outputs p3, p4, p5 as described on FPN paper.
     c5          -> conv 1x1 ->      p5 
     ^                               V
     CNNBlock                        UpSample
@@ -126,6 +131,8 @@ class FPN(nn.Module):
         # Upsampler, nearest essentially creates 4 copies of a value in a 2x2 grid.
         self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
 
+        # conv_ci_pi means convolution that connects ci to pi
+        # conv_sum_pi means convolution that is applied to the sum at stage i.
         self.conv_c5_p5 = CNNBlock(1024, 256, 1, 1, 0)
 
         self.conv_c4_p4 = CNNBlock(512, 256, 1, 1, 0)
@@ -141,26 +148,74 @@ class FPN(nn.Module):
 
         return p3, p4, p5
     
+class DetectionHead(nn.Module):
+    """
+    Converts the output of FPN into detections.
+    Input: corresponding stage of FPN
+    Output: Vector of shape: (#batch, #boxes, G, G, (5 + #C))
+    were 5 stands for 4 dimensions and objectness, #C stands for the  
+    number of classes, #boxes is the number of anchor boxes for each cell.
+    Finally, G is the grid resolution.
+    Note: Feature map sizes for FPN outputs:
+        p3: 32x32
+        p4: 16x16
+        p5: 8x8
+    """
+    def __init__(self, num_classes, num_anchors) -> None:
+        super().__init__()
+
+        self.num_classes = num_classes
+        self.num_anchors = num_anchors
+        # output length for each bounding box:
+        self.box_out = 5 + self.num_classes
+
+        # convolutional layer for each detection:
+        self.conv3 = CNNBlock(256, self.num_anchors * self.box_out, 1, 1, 0)
+        self.conv4 = CNNBlock(256, self.num_anchors * self.box_out, 1, 1, 0)
+        self.conv5 = CNNBlock(256, self.num_anchors * self.box_out, 1, 1, 0)
+
+    def forward(self, p3, p4, p5):
+
+        b, _, gx, gy = p3.shape # batch, number of channels, feature map resolution
+        d3 = self.conv3(p3).view(b, self.num_anchors, gx, gy, self.box_out)
+
+        b, _, gx, gy = p4.shape
+        d4 = self.conv4(p4).view(b, self.num_anchors, gx, gy, self.box_out)
+
+        b, _, gx, gy = p5.shape
+        d5 = self.conv5(p5).view(b, self.num_anchors, gx, gy, self.box_out)
+
+        return d3, d4, d5
+
+
+
+    
 class YOLOv3(nn.Module):
-    def __init__(self) -> None:
+    """
+    YOLOv3 model put together.
+    First, input image goes through Darknet53 backbone, then FPN is applied
+    Finally, the 3 output detections are obtained through detection heads.
+    """
+    def __init__(self, num_classes = 13, num_anchors = 3) -> None:
         super().__init__()
 
         self.darknet = Darknet53()
         self.fpn = FPN()
+        self.detection_head = DetectionHead(num_classes, num_anchors)
 
     def forward(self, x):
         _, _, c3, c4, c5 = self.darknet(x)
 
         p3, p4, p5 = self.fpn(c3, c4, c5)
 
-        return p3, p4, p5
+        d3, d4, d5 = self.detection_head(p3, p4, p5)
 
-
+        return d3, d4, d5
 
 
 if __name__=="__main__":
     model = Darknet53()
-    summary(model, input_size=(16, 3, 256, 256))
+    # summary(model, input_size=(16, 3, 256, 256))
     # Verifying output dimensions
     # input = torch.rand(16, 3, 256, 256)
     # output = model(input)
@@ -169,89 +224,76 @@ if __name__=="__main__":
     model = YOLOv3()
     summary(model, input_size=(16, 3, 256, 256))
 
-
-
-# torchinfo output for Darknet:
-"""==========================================================================================
-Layer (type:depth-idx)                   Output Shape              Param #
-==========================================================================================
-Darknet53                                [16, 64, 128, 128]        --
-├─Sequential: 1-1                        [16, 64, 128, 128]        --
-│    └─CNNBlock: 2-1                     [16, 32, 256, 256]        --
-│    │    └─Sequential: 3-1              [16, 32, 256, 256]        928
-│    └─CNNBlock: 2-2                     [16, 64, 128, 128]        --
-│    │    └─Sequential: 3-2              [16, 64, 128, 128]        18,560
-│    └─ResBlock: 2-3                     [16, 64, 128, 128]        --
-│    │    └─Sequential: 3-3              [16, 64, 128, 128]        20,576
-├─Sequential: 1-2                        [16, 128, 64, 64]         --
-│    └─CNNBlock: 2-4                     [16, 128, 64, 64]         --
-│    │    └─Sequential: 3-4              [16, 128, 64, 64]         73,984
-│    └─ResBlock: 2-5                     [16, 128, 64, 64]         --
-│    │    └─Sequential: 3-5              [16, 128, 64, 64]         82,112
-│    └─ResBlock: 2-6                     [16, 128, 64, 64]         --
-│    │    └─Sequential: 3-6              [16, 128, 64, 64]         82,112
-├─Sequential: 1-3                        [16, 256, 32, 32]         --
-│    └─CNNBlock: 2-7                     [16, 256, 32, 32]         --
-│    │    └─Sequential: 3-7              [16, 256, 32, 32]         295,424
-│    └─ResBlock: 2-8                     [16, 256, 32, 32]         --
-│    │    └─Sequential: 3-8              [16, 256, 32, 32]         328,064
-│    └─ResBlock: 2-9                     [16, 256, 32, 32]         --
-│    │    └─Sequential: 3-9              [16, 256, 32, 32]         328,064
-│    └─ResBlock: 2-10                    [16, 256, 32, 32]         --
-│    │    └─Sequential: 3-10             [16, 256, 32, 32]         328,064
-│    └─ResBlock: 2-11                    [16, 256, 32, 32]         --
-│    │    └─Sequential: 3-11             [16, 256, 32, 32]         328,064
-│    └─ResBlock: 2-12                    [16, 256, 32, 32]         --
-│    │    └─Sequential: 3-12             [16, 256, 32, 32]         328,064
-│    └─ResBlock: 2-13                    [16, 256, 32, 32]         --
-│    │    └─Sequential: 3-13             [16, 256, 32, 32]         328,064
-│    └─ResBlock: 2-14                    [16, 256, 32, 32]         --
-│    │    └─Sequential: 3-14             [16, 256, 32, 32]         328,064
-│    └─ResBlock: 2-15                    [16, 256, 32, 32]         --
-│    │    └─Sequential: 3-15             [16, 256, 32, 32]         328,064
-├─Sequential: 1-4                        [16, 512, 16, 16]         --
-│    └─CNNBlock: 2-16                    [16, 512, 16, 16]         --
-│    │    └─Sequential: 3-16             [16, 512, 16, 16]         1,180,672
-│    └─ResBlock: 2-17                    [16, 512, 16, 16]         --
-│    │    └─Sequential: 3-17             [16, 512, 16, 16]         1,311,488
-│    └─ResBlock: 2-18                    [16, 512, 16, 16]         --
-│    │    └─Sequential: 3-18             [16, 512, 16, 16]         1,311,488
-│    └─ResBlock: 2-19                    [16, 512, 16, 16]         --
-│    │    └─Sequential: 3-19             [16, 512, 16, 16]         1,311,488
-│    └─ResBlock: 2-20                    [16, 512, 16, 16]         --
-│    │    └─Sequential: 3-20             [16, 512, 16, 16]         1,311,488
-│    └─ResBlock: 2-21                    [16, 512, 16, 16]         --
-│    │    └─Sequential: 3-21             [16, 512, 16, 16]         1,311,488
-│    └─ResBlock: 2-22                    [16, 512, 16, 16]         --
-│    │    └─Sequential: 3-22             [16, 512, 16, 16]         1,311,488
-│    └─ResBlock: 2-23                    [16, 512, 16, 16]         --
-│    │    └─Sequential: 3-23             [16, 512, 16, 16]         1,311,488
-│    └─ResBlock: 2-24                    [16, 512, 16, 16]         --
-│    │    └─Sequential: 3-24             [16, 512, 16, 16]         1,311,488
-├─Sequential: 1-5                        [16, 1024, 8, 8]          --
-│    └─CNNBlock: 2-25                    [16, 1024, 8, 8]          --
-│    │    └─Sequential: 3-25             [16, 1024, 8, 8]          4,720,640
-│    └─ResBlock: 2-26                    [16, 1024, 8, 8]          --
-│    │    └─Sequential: 3-26             [16, 1024, 8, 8]          5,244,416
-│    └─ResBlock: 2-27                    [16, 1024, 8, 8]          --
-│    │    └─Sequential: 3-27             [16, 1024, 8, 8]          5,244,416
-│    └─ResBlock: 2-28                    [16, 1024, 8, 8]          --
-│    │    └─Sequential: 3-28             [16, 1024, 8, 8]          5,244,416
-│    └─ResBlock: 2-29                    [16, 1024, 8, 8]          --
-│    │    └─Sequential: 3-29             [16, 1024, 8, 8]          5,244,416
-==========================================================================================
-Total params: 40,569,088
-Trainable params: 40,569,088
+# torchinfo output for Full Model:
+"""
+===============================================================================================
+Layer (type:depth-idx)                        Output Shape              Param #
+===============================================================================================
+YOLOv3                                        [16, 3, 32, 32, 18]       --
+├─Darknet53: 1-1                              [16, 64, 128, 128]        --
+│    └─Sequential: 2-1                        [16, 64, 128, 128]        --
+│    │    └─CNNBlock: 3-1                     [16, 32, 256, 256]        928
+│    │    └─CNNBlock: 3-2                     [16, 64, 128, 128]        18,560
+│    │    └─ResBlock: 3-3                     [16, 64, 128, 128]        20,576
+│    └─Sequential: 2-2                        [16, 128, 64, 64]         --
+│    │    └─CNNBlock: 3-4                     [16, 128, 64, 64]         73,984
+│    │    └─ResBlock: 3-5                     [16, 128, 64, 64]         82,112
+│    │    └─ResBlock: 3-6                     [16, 128, 64, 64]         82,112
+│    └─Sequential: 2-3                        [16, 256, 32, 32]         --
+│    │    └─CNNBlock: 3-7                     [16, 256, 32, 32]         295,424
+│    │    └─ResBlock: 3-8                     [16, 256, 32, 32]         328,064
+│    │    └─ResBlock: 3-9                     [16, 256, 32, 32]         328,064
+│    │    └─ResBlock: 3-10                    [16, 256, 32, 32]         328,064
+│    │    └─ResBlock: 3-11                    [16, 256, 32, 32]         328,064
+│    │    └─ResBlock: 3-12                    [16, 256, 32, 32]         328,064
+│    │    └─ResBlock: 3-13                    [16, 256, 32, 32]         328,064
+│    │    └─ResBlock: 3-14                    [16, 256, 32, 32]         328,064
+│    │    └─ResBlock: 3-15                    [16, 256, 32, 32]         328,064
+│    └─Sequential: 2-4                        [16, 512, 16, 16]         --
+│    │    └─CNNBlock: 3-16                    [16, 512, 16, 16]         1,180,672
+│    │    └─ResBlock: 3-17                    [16, 512, 16, 16]         1,311,488
+│    │    └─ResBlock: 3-18                    [16, 512, 16, 16]         1,311,488
+│    │    └─ResBlock: 3-19                    [16, 512, 16, 16]         1,311,488
+│    │    └─ResBlock: 3-20                    [16, 512, 16, 16]         1,311,488
+│    │    └─ResBlock: 3-21                    [16, 512, 16, 16]         1,311,488
+│    │    └─ResBlock: 3-22                    [16, 512, 16, 16]         1,311,488
+│    │    └─ResBlock: 3-23                    [16, 512, 16, 16]         1,311,488
+│    │    └─ResBlock: 3-24                    [16, 512, 16, 16]         1,311,488
+│    └─Sequential: 2-5                        [16, 1024, 8, 8]          --
+│    │    └─CNNBlock: 3-25                    [16, 1024, 8, 8]          4,720,640
+│    │    └─ResBlock: 3-26                    [16, 1024, 8, 8]          5,244,416
+│    │    └─ResBlock: 3-27                    [16, 1024, 8, 8]          5,244,416
+│    │    └─ResBlock: 3-28                    [16, 1024, 8, 8]          5,244,416
+│    │    └─ResBlock: 3-29                    [16, 1024, 8, 8]          5,244,416
+├─FPN: 1-2                                    [16, 256, 32, 32]         --
+│    └─CNNBlock: 2-6                          [16, 256, 8, 8]           --
+│    │    └─Sequential: 3-30                  [16, 256, 8, 8]           262,656
+│    └─Upsample: 2-7                          [16, 256, 16, 16]         --
+│    └─CNNBlock: 2-8                          [16, 256, 16, 16]         --
+│    │    └─Sequential: 3-31                  [16, 256, 16, 16]         131,584
+│    └─CNNBlock: 2-9                          [16, 256, 16, 16]         --
+│    │    └─Sequential: 3-32                  [16, 256, 16, 16]         66,048
+│    └─Upsample: 2-10                         [16, 256, 32, 32]         --
+│    └─CNNBlock: 2-11                         [16, 256, 32, 32]         --
+│    │    └─Sequential: 3-33                  [16, 256, 32, 32]         66,048
+│    └─CNNBlock: 2-12                         [16, 256, 32, 32]         --
+│    │    └─Sequential: 3-34                  [16, 256, 32, 32]         66,048
+├─DetectionHead: 1-3                          [16, 3, 32, 32, 18]       --
+│    └─CNNBlock: 2-13                         [16, 54, 32, 32]          --
+│    │    └─Sequential: 3-35                  [16, 54, 32, 32]          13,932
+│    └─CNNBlock: 2-14                         [16, 54, 16, 16]          --
+│    │    └─Sequential: 3-36                  [16, 54, 16, 16]          13,932
+│    └─CNNBlock: 2-15                         [16, 54, 8, 8]            --
+│    │    └─Sequential: 3-37                  [16, 54, 8, 8]            13,932
+===============================================================================================
+Total params: 41,203,268
+Trainable params: 41,203,268
 Non-trainable params: 0
-Total mult-adds (G): 148.68
-==========================================================================================
+Total mult-adds (G): 152.20
+===============================================================================================
 Input size (MB): 12.58
-Forward/backward pass size (MB): 2113.93
-Params size (MB): 162.28
-Estimated Total Size (MB): 2288.79
-==========================================================================================
-torch.Size([16, 64, 128, 128])
-torch.Size([16, 128, 64, 64])
-torch.Size([16, 256, 32, 32])
-torch.Size([16, 512, 16, 16])
-torch.Size([16, 1024, 8, 8])"""
+Forward/backward pass size (MB): 2304.48
+Params size (MB): 164.81
+Estimated Total Size (MB): 2481.87
+===============================================================================================
+"""
